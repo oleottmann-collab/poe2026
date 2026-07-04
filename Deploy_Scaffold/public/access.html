@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8" />
+<title>Zugang beantragen - PoE Lernplattform</title>
+<meta name="robots" content="noindex, nofollow" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 440px; margin: 80px auto; padding: 0 20px; color: #1a1a1a; text-align: center; }
+  h1 { font-size: 1.2rem; }
+  input { width: 100%; padding: 10px; margin-top: 16px; box-sizing: border-box; font-size: 1rem; }
+  button { margin-top: 16px; padding: 10px 20px; font-size: 1rem; cursor: pointer; width: 100%; }
+  #status { margin-top: 24px; font-size: 0.9rem; color: #555; }
+  #error { margin-top: 16px; color: #a00; font-size: 0.9rem; }
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #ccc; border-top-color: #555; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 8px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+  <h1>Zugang zur PoE Lernplattform</h1>
+
+  <form id="requestForm">
+    <input type="email" id="email" placeholder="deine.email@beispiel.de" required />
+    <button type="submit">Zugang beantragen</button>
+  </form>
+
+  <div id="status" style="display:none;"></div>
+  <div id="error" style="display:none;"></div>
+
+  <script>
+    const form = document.getElementById("requestForm");
+    const emailInput = document.getElementById("email");
+    const statusEl = document.getElementById("status");
+    const errorEl = document.getElementById("error");
+    let pollTimer = null;
+
+    function showStatus(text) {
+      form.style.display = "none";
+      statusEl.style.display = "block";
+      statusEl.innerHTML = text;
+    }
+
+    function showError(text) {
+      errorEl.style.display = "block";
+      errorEl.textContent = text;
+    }
+
+    async function poll(email) {
+      try {
+        const res = await fetch("/api/status?email=" + encodeURIComponent(email));
+        const data = await res.json();
+        if (data.status === "approved") {
+          showStatus("Freigegeben, du wirst weitergeleitet...");
+          clearInterval(pollTimer);
+          window.location.href = "/";
+        } else if (data.status === "denied") {
+          clearInterval(pollTimer);
+          showStatus("Diese Anfrage wurde abgelehnt. Wende dich direkt an Ole, falls das ein Irrtum war.");
+        } else {
+          showStatus('<span class="spinner"></span>Warte auf Freigabe durch Ole ...');
+        }
+      } catch {
+        // naechster Poll versucht es erneut, kein Abbruch
+      }
+    }
+
+    function startPolling(email) {
+      localStorage.setItem("poe_pending_email", email);
+      showStatus('<span class="spinner"></span>Warte auf Freigabe durch Ole ...');
+      poll(email);
+      pollTimer = setInterval(() => poll(email), 4000);
+    }
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      errorEl.style.display = "none";
+      const email = emailInput.value.trim().toLowerCase();
+      try {
+        const res = await fetch("/api/request", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email }),
+        });
+        const data = await res.json();
+        if (data.status === "approved") {
+          window.location.href = "/";
+          return;
+        }
+        if (data.status === "pending") {
+          startPolling(email);
+          return;
+        }
+        showError("Ungueltige E-Mail-Adresse.");
+      } catch {
+        showError("Etwas ist schiefgelaufen, bitte nochmal versuchen.");
+      }
+    });
+
+    // Falls schon eine Anfrage laeuft (Reload der Seite), direkt weiter pollen.
+    const remembered = localStorage.getItem("poe_pending_email");
+    if (remembered) startPolling(remembered);
+  </script>
+</body>
+</html>
