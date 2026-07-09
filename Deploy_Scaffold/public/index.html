@@ -172,6 +172,7 @@ kbd{font-family:inherit; font-size:11px; background:var(--surface-2); border:1px
     <div id="dataCheck"></div>
     <div class="grpswitch" id="fcGrp"></div>
     <div class="filters" id="fcFilters"></div>
+    <div class="filters" id="fcNewLimitBar"></div>
     <div class="progress-strip" id="fcProgress"></div>
     <div id="fcHost"></div>
   </section>
@@ -299,6 +300,7 @@ function renderCheck(){
 function loadState(){ try{ return JSON.parse(localStorage.getItem(LS_KEY))||{}; }catch(e){ return {}; } }
 function saveState(){ try{ localStorage.setItem(LS_KEY,JSON.stringify(STATE)); }catch(e){} }
 var STATE=loadState(); STATE.sr=STATE.sr||{}; STATE.ar=STATE.ar||{}; STATE.prefs=STATE.prefs||{}; STATE.blurt=STATE.blurt||{};
+if(STATE.prefs.newLimit===undefined) STATE.prefs.newLimit=3;
 if(!STATE._init){ STATE._init=Date.now(); } saveState();
 var DAY=86400000; function now(){ return Date.now(); }
 /* exam-oriented scheduling: exam 2026-07-27; intervals capped at exam date */
@@ -346,8 +348,51 @@ function cardPasses(c,f){
 /* ============================================================
    MODE 1: FLASHCARDS - lightweight SM-2
    ============================================================ */
-var FC={ filter:{grp:"gs",track:"",bkey:"",tag:""}, queue:[], pos:0, revealed:false };
+var FC={ filter:{grp:"gs",track:"",bkey:"",tag:""}, queue:[], pos:0, revealed:false, newPool:[], introducing:{} };
 function srGet(id){ return STATE.sr[id]; }
+/* gating: how many never-rated cards may be "in introduction" at once */
+function newLimitVal(){
+  var v=STATE.prefs.newLimit;
+  if(v==="inf") return Infinity;
+  var n=parseInt(v,10);
+  return (isNaN(n)||n<1) ? 3 : n;
+}
+function introducingCount(){ return Object.keys(FC.introducing).length; }
+function fillNewSlots(){
+  var limit=newLimitVal();
+  while(introducingCount()<limit && FC.newPool.length>0){
+    var c=FC.newPool.shift();
+    FC.introducing[c.id]=true;
+    FC.queue.push(c);
+  }
+}
+/* requeue a repeated card with a buffer instead of showing it back to back */
+function requeueWithGap(c){
+  var GAP=3;
+  var idx=Math.min(FC.queue.length, FC.pos+1+GAP);
+  FC.queue.splice(idx,0,c);
+}
+/* keep due-date priority, but break up runs of the same block so reviews are mixed */
+function interleaveByBlock(due){
+  for(var i=1;i<due.length;i++){
+    if(bkeyOf(due[i])===bkeyOf(due[i-1])){
+      var j=i+1; while(j<due.length && bkeyOf(due[j])===bkeyOf(due[i-1])) j++;
+      if(j<due.length){ var t=due[i]; due[i]=due[j]; due[j]=t; }
+    }
+  }
+  return due;
+}
+function renderNewLimitBar(){
+  var el=document.getElementById("fcNewLimitBar"); if(!el) return;
+  var cur=String(STATE.prefs.newLimit);
+  var opts=[["1","1"],["2","2"],["3","3"],["5","5"],["inf","unbegrenzt"]];
+  el.innerHTML='<div class="grp"><label>Neue Karten gleichzeitig</label><select id="fcNewLimitSel">'+
+    opts.map(function(o){ return '<option value="'+o[0]+'"'+(cur===o[0]?" selected":"")+'>'+o[1]+'</option>'; }).join("")+
+    '</select></div>';
+  document.getElementById("fcNewLimitSel").onchange=function(){
+    STATE.prefs.newLimit=this.value; saveState(); fillNewSlots(); renderFcProgress();
+  };
+}
 function predictInterval(s,grade){
   var ease=s?s.ease:2.3, iv=s?s.iv:0, reps=s?s.reps:0;
   if(grade==="again") return {iv:0, ease:Math.max(1.3,ease-0.2), reps:0, lapse:true, grade:"again"};
@@ -371,7 +416,10 @@ function buildQueue(){
   var elig=fcEligible(), due=[], fresh=[];
   elig.forEach(function(c){ var s=srGet(c.id); if(!s) fresh.push(c); else if(s.due<=now()) due.push(c); });
   due.sort(function(a,b){ return srGet(a.id).due-srGet(b.id).due; });
-  FC.queue=due.concat(fresh); FC.pos=0; FC.revealed=false;
+  interleaveByBlock(due);
+  FC.newPool=fresh; FC.introducing={};
+  FC.queue=due.slice(); FC.pos=0; FC.revealed=false;
+  fillNewSlots();
 }
 function fcStats(){
   var elig=fcEligible(), due=0,fresh=0,learned=0;
@@ -380,8 +428,11 @@ function fcStats(){
 }
 function renderFcProgress(){
   var st=fcStats();
+  var waiting=FC.newPool?FC.newPool.length:0;
   document.getElementById("fcProgress").innerHTML=
-    '<span class="chip-stat"><b>'+st.due+'</b> due</span><span class="chip-stat"><b>'+st.fresh+'</b> new</span><span class="chip-stat"><b>'+st.learned+'</b> learned</span><span class="chip-stat"><b>'+st.total+'</b> in filter</span>';
+    '<span class="chip-stat"><b>'+st.due+'</b> due</span><span class="chip-stat"><b>'+st.fresh+'</b> new</span>'+
+    (waiting>0?'<span class="chip-stat"><b>'+waiting+'</b> waiting</span>':'')+
+    '<span class="chip-stat"><b>'+st.learned+'</b> learned</span><span class="chip-stat"><b>'+st.total+'</b> in filter</span>';
 }
 function renderFc(){
   renderFcProgress();
@@ -423,9 +474,15 @@ function fcScrollInto(el,mode){ if(!el||!el.scrollIntoView) return; requestAnima
 function fcToggleExpl(which){ if(!document.getElementById("fcA")) return; if(!FC.revealed) fcReveal(); var d=document.getElementById(which==="de"?"fcExplDe":"fcExplEn"); if(!d) return; d.open=!d.open; if(d.open) fcScrollInto(d,"start"); }
 function fcRate(grade){
   var c=FC.queue[FC.pos], s=srGet(c.id), p=predictInterval(s,grade);
+  var wasIntroducing=!!FC.introducing[c.id];
   STATE.sr[c.id]={ ease:p.ease, iv:p.iv, reps:p.reps, lapses:(s?s.lapses:0)+(p.lapse?1:0), due:now()+Math.max(0,p.iv)*DAY, last:now(), grade:grade };
   saveState();
-  if(grade==="again") FC.queue.push(c);
+  if(grade==="again"){
+    requeueWithGap(c); /* stays in FC.introducing if it was there: slot stays blocked */
+  } else if(wasIntroducing){
+    delete FC.introducing[c.id];
+    fillNewSlots();
+  }
   FC.pos++; FC.revealed=false; renderFc();
 }
 
@@ -661,7 +718,7 @@ document.addEventListener("keydown", function(e){
   if(e.key==="d"||e.key==="D"){ e.preventDefault(); fcToggleExpl("de"); return; }
   if(FC.revealed && FC.queue[FC.pos]){ if(e.key==="1")fcRate("again"); else if(e.key==="2")fcRate("hard"); else if(e.key==="3")fcRate("good"); else if(e.key==="4")fcRate("easy"); }
 });
-function refreshFc(grpChanged){ renderFilterBar("fc","fcFilters",FC.filter,{}); wireFilters("fc",FC.filter,function(){ buildQueue(); renderFc(); }); buildQueue(); renderFc(); if(grpChanged) renderGrpSwitch("fcGrp",FC.filter,refreshFc); }
+function refreshFc(grpChanged){ renderFilterBar("fc","fcFilters",FC.filter,{}); wireFilters("fc",FC.filter,function(){ buildQueue(); renderFc(); }); renderNewLimitBar(); buildQueue(); renderFc(); if(grpChanged) renderGrpSwitch("fcGrp",FC.filter,refreshFc); }
 function refreshAr(grpChanged){ renderFilterBar("ar","arFilters",AR.filter,{}); wireFilters("ar",AR.filter,function(){ AR.pos=0; renderAr(); }); AR.pos=0; renderAr(); if(grpChanged) renderGrpSwitch("arGrp",AR.filter,refreshAr); }
 function refreshBl(grpChanged){ BL.filter.bkey=""; renderBlurting(); if(grpChanged) renderGrpSwitch("blGrp",BL.filter,refreshBl); }
 function statSecureThreshold(){ return 2; }
@@ -744,6 +801,7 @@ window.__POE__={
   grpOf:grpOf, bkeyOf:bkeyOf, examTagOf:examTagOf, bkeySort:bkeySort,
   scoreRecall:scoreRecall, extractKeywords:extractKeywords, levelOf:levelOf, predictInterval:predictInterval, cardPasses:cardPasses,
   FC:FC, AR:AR, BL:BL, showView:showView, renderStats:renderStats, fcReveal:fcReveal, fcRate:fcRate, arCheck:arCheck, buildQueue:buildQueue,
+  fillNewSlots:fillNewSlots, newLimitVal:newLimitVal, interleaveByBlock:interleaveByBlock,
   refreshFc:refreshFc, refreshAr:refreshAr, refreshBl:refreshBl, renderFc:renderFc, renderAr:renderAr,
   state:function(){ return loadState(); }, HAS_G2:HAS_G2
 };
